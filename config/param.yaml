@@ -1,0 +1,10 @@
+ttc_calculator:
+  # Extrinsic matrix: 4x4 transformation from sensor to vehicle origin
+  # Row-major format: [r00, r01, r02, tx, r10, r11, r12, ty, r20, r21, r22, tz, 0, 0, 0, 1]
+  front_translation: [0.0, 0.0, 0.0]
+  back_translation: [0.0, 0.0, 0.0]
+  # Vehicle bounding box length in meters (1D longitudinal)
+  front_vehicle_bbox_length: 4.5
+  back_vehicle_bbox_length: 4.5
+  # TTC safety threshold in seconds
+  safety_threshold: 1.5
