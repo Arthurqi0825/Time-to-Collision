@@ -43,7 +43,7 @@ ttc/
 1. Clone this package into your ROS workspace:
    ```bash
    cd ~/catkin_ws/src
-   git clone <repository_url> ttc
+   git clone https://github.com/Arthurqi0825/Time-to-Collision.git ttc
    ```
 
 2. Build the workspace:
@@ -81,69 +81,21 @@ Several Python scripts are provided for testing and simulation:
 - **`two_cars.py`**: Simulation setup for two-vehicle scenarios
 - **`combine.py`**: Combines multiple data sources
 
-<!-- ## Configuration
 
-Configure the TTC calculator via `config/param.yaml`:
+### Collecting Custom Data
 
-```yaml
-ttc_calculator:
-  # Vehicle bounding box dimensions (meters)
-  front_vehicle_bbox_length: 4.5    # Front vehicle length
-  back_vehicle_bbox_length: 4.5     # Back vehicle length
-  
-  # Sensor calibration translations
-  front_translation: [0.0, 0.0, 0.0]
-  back_translation: [0.0, 0.0, 0.0]
-  
-  # Safety thresholds (seconds)
-  safety_threshold: 1.5             # Collision warning threshold
+To collect your own vehicle data, use the `combine.py` script:
+
+```bash
+python scripts/combine.py
 ```
 
-### ROS Parameters
+This script aggregates data from multiple sources (CARLA simulator, vehicle sensors, or manual inputs) 
 
-Set via `rosparam` or in launch files:
-
-- `noise_std` (double, default: 0.5): Standard deviation of Gaussian noise (meters)
-- `ttc_warning_threshold` (double, default: 5.0): Warning TTC threshold (seconds)
-- `ttc_critical_threshold` (double, default: 2.0): Critical collision threshold (seconds)
-- `update_rate` (double, default: 50.0): Update frequency (Hz)
-
-### Topic Configuration
-
-Customize input/output topics via parameters:
-
-- `static_pose_topic`: Static vehicle pose (default: `/vehicle/static/pose`)
-- `static_velocity_topic`: Static vehicle velocity (default: `/vehicle/static/velocity`)
-- `manual_pose_topic`: Manually controlled vehicle pose (default: `/vehicle/manual/pose`)
-- `manual_velocity_topic`: Manually controlled vehicle velocity (default: `/vehicle/manual/velocity`)
-- `ttc_true_topic`: Ground truth TTC output (default: `/ttc/true`)
-- `ttc_estimated_topic`: Estimated TTC with noise (default: `/ttc/estimated`)
-- `ttc_visualization_topic`: Visualization markers (default: `/ttc/visualization`)
-
-## Input Topics
-
-The calculator subscribes to the following message types:
-
-| Topic | Message Type | Description |
-|-------|--------------|-------------|
-| `/vehicle/static/pose` | `geometry_msgs/PoseStamped` | Static vehicle position and orientation |
-| `/vehicle/static/velocity` | `geometry_msgs/TwistStamped` | Static vehicle linear/angular velocity |
-| `/vehicle/static/bounding_box` | `visualization_msgs/Marker` | Static vehicle dimensions |
-| `/vehicle/manual/pose` | `geometry_msgs/PoseStamped` | Manual vehicle position and orientation |
-| `/vehicle/manual/velocity` | `geometry_msgs/TwistStamped` | Manual vehicle velocity |
-| `/vehicle/manual/bounding_box` | `visualization_msgs/Marker` | Manual vehicle dimensions |
-
-## Output Topics
-
-| Topic | Message Type | Description |
-|-------|--------------|-------------|
-| `/ttc/true` | `std_msgs/Float64` | Ground truth time-to-collision (seconds) |
-| `/ttc/estimated` | `std_msgs/Float64` | Estimated TTC with sensor noise (seconds) |
-| `/ttc/visualization` | `visualization_msgs/MarkerArray` | Visual markers for RViz display |
-| `/ttc/text` | `visualization_msgs/Marker` | Text overlay showing TTC values |
-| `/vehicle/manual/pose_true` | `geometry_msgs/PoseStamped` | True pose of manual vehicle |
-| `/vehicle/manual/pose_estimated` | `geometry_msgs/PoseStamped` | Estimated pose with noise | -->
-
+```bash
+#Original carla manual control scripts 
+python scripts/manual_control
+``` 
 ## Visualization
 
 View real-time TTC calculations and collision states in RViz:
