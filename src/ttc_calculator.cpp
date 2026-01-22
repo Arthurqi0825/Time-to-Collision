@@ -1,16 +1,27 @@
 #include <ros/ros.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TwistStamped.h>
+#include <geometry_msgs/TransformStamped.h>
 #include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
 #include <std_msgs/Float64.h>
+#include <std_msgs/String.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2/LinearMath/Quaternion.h>
 #include <cmath>
-#include <string>
-#include <sstream>
-#include <iomanip>
 #include <random>
 #include <limits>
 #include <algorithm>
+
+// Custom message for TTC data
+struct TTCData {
+    double ttc_true;
+    double ttc_estimated;
+    double distance_true;
+    double distance_estimated;
+    double position_error;
+    ros::Time timestamp;
+    std::string warning_level;  // "SAFE", "WARNING", "CRITICAL", "COLLISION"
+};
 
 // Vehicle state structure
 struct VehicleState {
@@ -50,12 +61,13 @@ public:
         
         // Create timer for periodic updates
         double update_rate;
-        nh_.param<double>("update_rate", update_rate, 50.0);
+        nh_.param<double>("update_rate", update_rate, 500.0);
         timer_ = nh_.createTimer(ros::Duration(1.0 / update_rate), 
                                  &TTCCalculator::timerCallback, this);
         
-        ROS_INFO("TTC Calculator Node Started (with Gaussian Noise)");
-        ROS_INFO("  Noise std deviation: %.2f meters", noise_std_);
+        ROS_INFO("TTC Calculator Node Started");
+        ROS_INFO("  Noise std deviation: %.3f meters", noise_std_);
+        ROS_INFO("  Communication delay: %.3f seconds", comm_delay_);
         ROS_INFO("  Warning threshold: %.1f seconds", ttc_warning_threshold_);
         ROS_INFO("  Critical threshold: %.1f seconds", ttc_critical_threshold_);
     }
@@ -82,56 +94,46 @@ private:
     // ROS Publishers
     ros::Publisher ttc_true_pub_;
     ros::Publisher ttc_estimated_pub_;
-    ros::Publisher ttc_marker_pub_;
-    ros::Publisher ttc_text_pub_;
+    ros::Publisher distance_true_pub_;
+    ros::Publisher distance_estimated_pub_;
+    ros::Publisher position_error_pub_;
+    ros::Publisher warning_level_pub_;
     ros::Publisher manual_true_pose_pub_;
     ros::Publisher manual_noisy_pose_pub_;
+    
+    // TF Broadcaster
+    tf2_ros::TransformBroadcaster tf_broadcaster_;
     
     // Timer
     ros::Timer timer_;
     
     // Parameters
     double noise_std_;
+    double comm_delay_;  // Communication delay in seconds
     double ttc_warning_threshold_;
     double ttc_critical_threshold_;
-    
-    // Topic names
-    std::string static_pose_topic_;
-    std::string static_velocity_topic_;
-    std::string static_bbox_topic_;
-    std::string manual_pose_topic_;
-    std::string manual_velocity_topic_;
-    std::string manual_bbox_topic_;
-    std::string ttc_true_topic_;
-    std::string ttc_estimated_topic_;
-    std::string ttc_visualization_topic_;
-    std::string ttc_text_topic_;
-    std::string manual_true_pose_topic_;
-    std::string manual_noisy_pose_topic_;
     
     // Random number generator
     std::default_random_engine generator_;
     std::normal_distribution<double> distribution_;
     
+    // Warning state with delay
+    struct DelayedWarning {
+        std::string level;
+        ros::Time trigger_time;
+        bool active;
+        
+        DelayedWarning() : level("SAFE"), active(false) {}
+    };
+    
+    DelayedWarning current_warning_;
+    
     // Load parameters from ROS parameter server
     void loadParameters() {
         nh_.param<double>("noise_std", noise_std_, 0.5);
+        nh_.param<double>("comm_delay", comm_delay_, 0.1);  // Default 100ms delay
         nh_.param<double>("ttc_warning_threshold", ttc_warning_threshold_, 5.0);
-        nh_.param<double>("ttc_critical_threshold", ttc_critical_threshold_, 2.0);
-        
-        // Topic names
-        nh_.param<std::string>("static_pose_topic", static_pose_topic_, "/vehicle/static/pose");
-        nh_.param<std::string>("static_velocity_topic", static_velocity_topic_, "/vehicle/static/velocity");
-        nh_.param<std::string>("static_bbox_topic", static_bbox_topic_, "/vehicle/static/bounding_box");
-        nh_.param<std::string>("manual_pose_topic", manual_pose_topic_, "/vehicle/manual/pose");
-        nh_.param<std::string>("manual_velocity_topic", manual_velocity_topic_, "/vehicle/manual/velocity");
-        nh_.param<std::string>("manual_bbox_topic", manual_bbox_topic_, "/vehicle/manual/bounding_box");
-        nh_.param<std::string>("ttc_true_topic", ttc_true_topic_, "/ttc/true");
-        nh_.param<std::string>("ttc_estimated_topic", ttc_estimated_topic_, "/ttc/estimated");
-        nh_.param<std::string>("ttc_visualization_topic", ttc_visualization_topic_, "/ttc/visualization");
-        nh_.param<std::string>("ttc_text_topic", ttc_text_topic_, "/ttc/text");
-        nh_.param<std::string>("manual_true_pose_topic", manual_true_pose_topic_, "/vehicle/manual/pose_true");
-        nh_.param<std::string>("manual_noisy_pose_topic", manual_noisy_pose_topic_, "/vehicle/manual/pose_estimated");
+        nh_.param<double>("ttc_critical_threshold", ttc_critical_threshold_, 1.6);
         
         // Update noise distribution
         distribution_ = std::normal_distribution<double>(0.0, noise_std_);
@@ -139,28 +141,30 @@ private:
     
     // Initialize all subscribers
     void initializeSubscribers() {
-        static_pose_sub_ = nh_.subscribe(static_pose_topic_, 10, 
+        static_pose_sub_ = nh_.subscribe("/vehicle/static/pose", 10, 
                                          &TTCCalculator::staticPoseCallback, this);
-        static_vel_sub_ = nh_.subscribe(static_velocity_topic_, 10, 
+        static_vel_sub_ = nh_.subscribe("/vehicle/static/velocity", 10, 
                                         &TTCCalculator::staticVelocityCallback, this);
-        static_bbox_sub_ = nh_.subscribe(static_bbox_topic_, 10, 
+        static_bbox_sub_ = nh_.subscribe("/vehicle/static/bounding_box", 10, 
                                          &TTCCalculator::staticBBoxCallback, this);
-        manual_pose_sub_ = nh_.subscribe(manual_pose_topic_, 10, 
+        manual_pose_sub_ = nh_.subscribe("/vehicle/manual/pose", 10, 
                                          &TTCCalculator::manualPoseCallback, this);
-        manual_vel_sub_ = nh_.subscribe(manual_velocity_topic_, 10, 
+        manual_vel_sub_ = nh_.subscribe("/vehicle/manual/velocity", 10, 
                                         &TTCCalculator::manualVelocityCallback, this);
-        manual_bbox_sub_ = nh_.subscribe(manual_bbox_topic_, 10, 
+        manual_bbox_sub_ = nh_.subscribe("/vehicle/manual/bounding_box", 10, 
                                          &TTCCalculator::manualBBoxCallback, this);
     }
     
     // Initialize all publishers
     void initializePublishers() {
-        ttc_true_pub_ = nh_.advertise<std_msgs::Float64>(ttc_true_topic_, 10);
-        ttc_estimated_pub_ = nh_.advertise<std_msgs::Float64>(ttc_estimated_topic_, 10);
-        ttc_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(ttc_visualization_topic_, 10);
-        ttc_text_pub_ = nh_.advertise<visualization_msgs::Marker>(ttc_text_topic_, 10);
-        manual_true_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(manual_true_pose_topic_, 10);
-        manual_noisy_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(manual_noisy_pose_topic_, 10);
+        ttc_true_pub_ = nh_.advertise<std_msgs::Float64>("/ttc/true", 10);
+        ttc_estimated_pub_ = nh_.advertise<std_msgs::Float64>("/ttc/estimated", 10);
+        distance_true_pub_ = nh_.advertise<std_msgs::Float64>("/ttc/distance_true", 10);
+        distance_estimated_pub_ = nh_.advertise<std_msgs::Float64>("/ttc/distance_estimated", 10);
+        position_error_pub_ = nh_.advertise<std_msgs::Float64>("/ttc/position_error", 10);
+        warning_level_pub_ = nh_.advertise<std_msgs::String>("/ttc/warning_level", 10);
+        manual_true_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/vehicle/manual/pose_true", 10);
+        manual_noisy_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/vehicle/manual/pose_estimated", 10);
     }
     
     // Callbacks
@@ -193,32 +197,21 @@ private:
         manual_vehicle_true_.timestamp = msg->header.stamp;
         manual_vehicle_true_.pose_received = true;
         
-        // Add Gaussian noise for estimated position
-        double noise_x = distribution_(generator_);
-        double noise_y = distribution_(generator_);
-        
-        manual_vehicle_noisy_.x = msg->pose.position.x + noise_x;
-        manual_vehicle_noisy_.y = msg->pose.position.y + noise_y;
-        manual_vehicle_noisy_.z = msg->pose.position.z;
+        // Generate noisy position with Gaussian noise
+        manual_vehicle_noisy_.x = manual_vehicle_true_.x + distribution_(generator_);
+        manual_vehicle_noisy_.y = manual_vehicle_true_.y + distribution_(generator_);
+        manual_vehicle_noisy_.z = manual_vehicle_true_.z;
         manual_vehicle_noisy_.timestamp = msg->header.stamp;
         manual_vehicle_noisy_.pose_received = true;
         
-        // Publish true position
-        geometry_msgs::PoseStamped true_pose;
-        true_pose.header.stamp = ros::Time::now();
-        true_pose.header.frame_id = "map";
-        true_pose.pose = msg->pose;
-        manual_true_pose_pub_.publish(true_pose);
+        // Publish both true and noisy poses
+        geometry_msgs::PoseStamped true_pose_msg = *msg;
+        manual_true_pose_pub_.publish(true_pose_msg);
         
-        // Publish noisy position
-        geometry_msgs::PoseStamped noisy_pose;
-        noisy_pose.header.stamp = ros::Time::now();
-        noisy_pose.header.frame_id = "map";
-        noisy_pose.pose.position.x = manual_vehicle_noisy_.x;
-        noisy_pose.pose.position.y = manual_vehicle_noisy_.y;
-        noisy_pose.pose.position.z = manual_vehicle_noisy_.z;
-        noisy_pose.pose.orientation = msg->pose.orientation;
-        manual_noisy_pose_pub_.publish(noisy_pose);
+        geometry_msgs::PoseStamped noisy_pose_msg = *msg;
+        noisy_pose_msg.pose.position.x = manual_vehicle_noisy_.x;
+        noisy_pose_msg.pose.position.y = manual_vehicle_noisy_.y;
+        manual_noisy_pose_pub_.publish(noisy_pose_msg);
     }
     
     void manualVelocityCallback(const geometry_msgs::TwistStamped::ConstPtr& msg) {
@@ -243,110 +236,47 @@ private:
         manual_vehicle_noisy_.bbox_received = true;
     }
     
-    // Helper functions
+    // Helper: Calculate 2D distance
     double calculateDistance2D(double x1, double y1, double x2, double y2) const {
         double dx = x2 - x1;
         double dy = y2 - y1;
         return std::sqrt(dx * dx + dy * dy);
     }
     
-    // Get four corner points of a bounding box in 2D (simplified, assuming axis-aligned)
-    std::vector<Point2D> getBBoxCorners(const VehicleState& vehicle) const {
-        std::vector<Point2D> corners;
-        double half_length = vehicle.bbox_length / 2.0;
-        double half_width = vehicle.bbox_width / 2.0;
-        
-        // Four corners of the bounding box
-        corners.push_back(Point2D(vehicle.x + half_length, vehicle.y + half_width));
-        corners.push_back(Point2D(vehicle.x + half_length, vehicle.y - half_width));
-        corners.push_back(Point2D(vehicle.x - half_length, vehicle.y + half_width));
-        corners.push_back(Point2D(vehicle.x - half_length, vehicle.y - half_width));
-        
-        return corners;
-    }
-    
-    // Calculate distance from a point to a line segment
-    double pointToSegmentDistance(const Point2D& p, const Point2D& a, const Point2D& b) const {
-        double dx = b.x - a.x;
-        double dy = b.y - a.y;
-        
-        if (dx == 0 && dy == 0) {
-            // Segment is a point
-            return calculateDistance2D(p.x, p.y, a.x, a.y);
-        }
-        
-        // Calculate parameter t for the projection of point p onto line ab
-        double t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy);
-        
-        // Clamp t to [0, 1] to handle points outside the segment
-        t = std::max(0.0, std::min(1.0, t));
-        
-        // Calculate the closest point on the segment
-        double closest_x = a.x + t * dx;
-        double closest_y = a.y + t * dy;
-        
-        return calculateDistance2D(p.x, p.y, closest_x, closest_y);
-    }
-    
-    // Calculate minimum distance between two bounding boxes using closest points
-    double calculateClosestDistance(const VehicleState& vehicle1, const VehicleState& vehicle2) const {
-        std::vector<Point2D> corners1 = getBBoxCorners(vehicle1);
-        std::vector<Point2D> corners2 = getBBoxCorners(vehicle2);
-        
-        double min_distance = std::numeric_limits<double>::max();
-        
-        // Check distance from each corner of vehicle1 to each edge of vehicle2
-        for (const auto& corner : corners1) {
-            for (size_t i = 0; i < corners2.size(); ++i) {
-                size_t j = (i + 1) % corners2.size();
-                double dist = pointToSegmentDistance(corner, corners2[i], corners2[j]);
-                min_distance = std::min(min_distance, dist);
-            }
-        }
-        
-        // Check distance from each corner of vehicle2 to each edge of vehicle1
-        for (const auto& corner : corners2) {
-            for (size_t i = 0; i < corners1.size(); ++i) {
-                size_t j = (i + 1) % corners1.size();
-                double dist = pointToSegmentDistance(corner, corners1[i], corners1[j]);
-                min_distance = std::min(min_distance, dist);
-            }
-        }
-        
-        // Also check center-to-center distance as a baseline
-        double center_dist = calculateDistance2D(vehicle1.x, vehicle1.y, vehicle2.x, vehicle2.y);
-        
-        // If bounding boxes overlap, return 0
-        if (min_distance < 1e-6) {
-            return 0.0;
-        }
-        
-        return min_distance;
-    }
-    
+    // Helper: Check if manual vehicle is approaching static vehicle
     bool isApproaching(const VehicleState& manual_vehicle) const {
-        double dx = manual_vehicle.x - static_vehicle_.x;
-        double dy = manual_vehicle.y - static_vehicle_.y;
-        double dvx = manual_vehicle.vx - static_vehicle_.vx;
-        double dvy = manual_vehicle.vy - static_vehicle_.vy;
-        double dot_product = dx * dvx + dy * dvy;
-        return dot_product < 0;
+        double rel_vx = manual_vehicle.vx - static_vehicle_.vx;
+        double rel_vy = manual_vehicle.vy - static_vehicle_.vy;
+        double dx = static_vehicle_.x - manual_vehicle.x;
+        double dy = static_vehicle_.y - manual_vehicle.y;
+        
+        double dot_product = rel_vx * dx + rel_vy * dy;
+        return dot_product > 0;
     }
     
-    double calculateTTC(const VehicleState& manual_vehicle) {
-        // Check if all data is received
-        if (!static_vehicle_.pose_received || !static_vehicle_.velocity_received || 
-            !static_vehicle_.bbox_received || !manual_vehicle.pose_received || 
-            !manual_vehicle.velocity_received || !manual_vehicle.bbox_received) {
+    // Helper: Calculate closest distance between bounding boxes
+    double calculateClosestDistance(const VehicleState& v1, const VehicleState& v2) const {
+        if (!v1.bbox_received || !v2.bbox_received) {
+            return calculateDistance2D(v1.x, v1.y, v2.x, v2.y);
+        }
+        
+        double center_distance = calculateDistance2D(v1.x, v1.y, v2.x, v2.y);
+        double bbox_sum = (v1.bbox_length + v2.bbox_length) / 2.0;
+        
+        return std::max(0.0, center_distance - bbox_sum);
+    }
+    
+    // Calculate TTC
+    double calculateTTC(const VehicleState& manual_vehicle) const {
+        if (!static_vehicle_.pose_received || !static_vehicle_.velocity_received ||
+            !manual_vehicle.pose_received || !manual_vehicle.velocity_received) {
             return -1.0;
         }
         
-        // Calculate relative velocity
         double rel_vx = manual_vehicle.vx - static_vehicle_.vx;
         double rel_vy = manual_vehicle.vy - static_vehicle_.vy;
         double relative_speed = std::sqrt(rel_vx * rel_vx + rel_vy * rel_vy);
         
-        // Check if approaching
         if (!isApproaching(manual_vehicle)) {
             return -1.0;
         }
@@ -355,7 +285,6 @@ private:
             return -1.0;
         }
         
-        // Calculate closing speed along the line connecting the two vehicles
         double dx = manual_vehicle.x - static_vehicle_.x;
         double dy = manual_vehicle.y - static_vehicle_.y;
         double pos_magnitude = std::sqrt(dx * dx + dy * dy);
@@ -372,7 +301,6 @@ private:
             return -1.0;
         }
         
-        // Calculate closest distance between two bounding boxes
         double closest_distance = calculateClosestDistance(static_vehicle_, manual_vehicle);
         
         if (closest_distance <= 0) {
@@ -382,146 +310,151 @@ private:
         return closest_distance / closing_speed;
     }
     
-    void publishVisualization(double ttc_true, double ttc_estimated) {
-        // Publish numeric TTC values
+    // Determine warning level based on TTC
+    std::string determineWarningLevel(double ttc) const {
+        if (ttc < 0) {
+            return "SAFE";
+        } else if (ttc < 0.05) {  // TTC is essentially 0 (collision or imminent collision)
+            return "COLLISION";
+        } else if (ttc <= ttc_critical_threshold_) {
+            return "CRITICAL";
+        } else if (ttc <= ttc_warning_threshold_) {
+            return "WARNING";
+        } else {
+            return "SAFE";
+        }
+    }
+    
+    // Process and publish warning with communication delay
+    void processWarningWithDelay(const std::string& current_level, const ros::Time& current_time) {
+        // Check if we need to trigger a new warning
+        if (current_level != "SAFE" && current_level != current_warning_.level) {
+            current_warning_.level = current_level;
+            current_warning_.trigger_time = current_time;
+            current_warning_.active = true;
+        } else if (current_level == "SAFE") {
+            current_warning_.level = "SAFE";
+            current_warning_.active = false;
+        }
+        
+        // Publish warning if delay has passed
+        std_msgs::String warning_msg;
+        if (current_warning_.active) {
+            ros::Duration elapsed = current_time - current_warning_.trigger_time;
+            if (elapsed.toSec() >= comm_delay_) {
+                warning_msg.data = current_warning_.level;
+            } else {
+                // Still in delay period, publish previous state
+                warning_msg.data = "SAFE";
+            }
+        } else {
+            warning_msg.data = current_warning_.level;
+        }
+        
+        warning_level_pub_.publish(warning_msg);
+    }
+    
+    // Publish TF transforms for vehicles
+    void publishTF(const ros::Time& timestamp) {
+        // Only publish if we have received pose data
+        if (!static_vehicle_.pose_received || !manual_vehicle_true_.pose_received) {
+            return;
+        }
+        
+        // Static vehicle TF
+        geometry_msgs::TransformStamped static_tf;
+        static_tf.header.stamp = timestamp;
+        static_tf.header.frame_id = "map";
+        static_tf.child_frame_id = "static_vehicle";
+        
+        static_tf.transform.translation.x = static_vehicle_.x;
+        static_tf.transform.translation.y = static_vehicle_.y;
+        static_tf.transform.translation.z = static_vehicle_.z;
+        
+        // Assuming yaw-only rotation for simplicity (CARLA typically uses yaw)
+        tf2::Quaternion q_static;
+        q_static.setRPY(0, 0, 0);  // Can be enhanced with actual orientation
+        static_tf.transform.rotation.x = q_static.x();
+        static_tf.transform.rotation.y = q_static.y();
+        static_tf.transform.rotation.z = q_static.z();
+        static_tf.transform.rotation.w = q_static.w();
+        
+        tf_broadcaster_.sendTransform(static_tf);
+        
+        // Manual vehicle TF (true position)
+        geometry_msgs::TransformStamped manual_tf;
+        manual_tf.header.stamp = timestamp;
+        manual_tf.header.frame_id = "map";
+        manual_tf.child_frame_id = "manual_vehicle";
+        
+        manual_tf.transform.translation.x = manual_vehicle_true_.x;
+        manual_tf.transform.translation.y = manual_vehicle_true_.y;
+        manual_tf.transform.translation.z = manual_vehicle_true_.z;
+        
+        tf2::Quaternion q_manual;
+        q_manual.setRPY(0, 0, 0);  // Can be enhanced with actual orientation
+        manual_tf.transform.rotation.x = q_manual.x();
+        manual_tf.transform.rotation.y = q_manual.y();
+        manual_tf.transform.rotation.z = q_manual.z();
+        manual_tf.transform.rotation.w = q_manual.w();
+        
+        tf_broadcaster_.sendTransform(manual_tf);
+    }
+    
+    void timerCallback(const ros::TimerEvent&) {
+        ros::Time current_time = ros::Time::now();
+        
+        // Calculate TTC values
+        double ttc_true = calculateTTC(manual_vehicle_true_);
+        double ttc_estimated = calculateTTC(manual_vehicle_noisy_);
+        
+        // Calculate distances
+        double distance_true = calculateClosestDistance(static_vehicle_, manual_vehicle_true_);
+        double distance_estimated = calculateClosestDistance(static_vehicle_, manual_vehicle_noisy_);
+        
+        // Calculate position error
+        double position_error = calculateDistance2D(manual_vehicle_true_.x, manual_vehicle_true_.y,
+                                                     manual_vehicle_noisy_.x, manual_vehicle_noisy_.y);
+        
+        // Publish TTC values
         std_msgs::Float64 ttc_true_msg, ttc_estimated_msg;
         ttc_true_msg.data = ttc_true;
         ttc_estimated_msg.data = ttc_estimated;
         ttc_true_pub_.publish(ttc_true_msg);
         ttc_estimated_pub_.publish(ttc_estimated_msg);
         
-        // Create marker array for visualization (using noisy/estimated position)
-        visualization_msgs::MarkerArray marker_array;
+        // Publish distances
+        std_msgs::Float64 dist_true_msg, dist_est_msg;
+        dist_true_msg.data = distance_true;
+        dist_est_msg.data = distance_estimated;
+        distance_true_pub_.publish(dist_true_msg);
+        distance_estimated_pub_.publish(dist_est_msg);
         
-        // Line marker (estimated)
-        visualization_msgs::Marker line_marker;
-        line_marker.header.frame_id = "map";
-        line_marker.header.stamp = ros::Time::now();
-        line_marker.ns = "ttc_line_estimated";
-        line_marker.id = 0;
-        line_marker.type = visualization_msgs::Marker::LINE_STRIP;
-        line_marker.action = visualization_msgs::Marker::ADD;
+        // Publish position error
+        std_msgs::Float64 pos_error_msg;
+        pos_error_msg.data = position_error;
+        position_error_pub_.publish(pos_error_msg);
         
-        geometry_msgs::Point p1, p2;
-        p1.x = manual_vehicle_noisy_.x;
-        p1.y = manual_vehicle_noisy_.y;
-        p1.z = manual_vehicle_noisy_.z + 1.0;
-        p2.x = static_vehicle_.x;
-        p2.y = static_vehicle_.y;
-        p2.z = static_vehicle_.z + 1.0;
+        // Determine and publish warning level with delay
+        std::string warning_level = determineWarningLevel(ttc_estimated);
+        processWarningWithDelay(warning_level, current_time);
         
-        line_marker.points.push_back(p1);
-        line_marker.points.push_back(p2);
-        line_marker.scale.x = 0.1;
-        
-        // Color based on estimated TTC
-        if (ttc_estimated < 0) {
-            line_marker.color.r = 0.5;
-            line_marker.color.g = 0.5;
-            line_marker.color.b = 0.5;
-            line_marker.color.a = 0.5;
-        } else if (ttc_estimated <= ttc_critical_threshold_) {
-            line_marker.color.r = 1.0;
-            line_marker.color.g = 0.0;
-            line_marker.color.b = 0.0;
-            line_marker.color.a = 1.0;
-        } else if (ttc_estimated <= ttc_warning_threshold_) {
-            line_marker.color.r = 1.0;
-            line_marker.color.g = 1.0;
-            line_marker.color.b = 0.0;
-            line_marker.color.a = 0.8;
-        } else {
-            line_marker.color.r = 0.0;
-            line_marker.color.g = 1.0;
-            line_marker.color.b = 0.0;
-            line_marker.color.a = 0.6;
-        }
-        
-        line_marker.lifetime = ros::Duration(0.2);
-        marker_array.markers.push_back(line_marker);
-        
-        // Line marker (true) - in blue
-        visualization_msgs::Marker line_marker_true;
-        line_marker_true.header.frame_id = "map";
-        line_marker_true.header.stamp = ros::Time::now();
-        line_marker_true.ns = "ttc_line_true";
-        line_marker_true.id = 1;
-        line_marker_true.type = visualization_msgs::Marker::LINE_STRIP;
-        line_marker_true.action = visualization_msgs::Marker::ADD;
-        
-        geometry_msgs::Point p1_true, p2_true;
-        p1_true.x = manual_vehicle_true_.x;
-        p1_true.y = manual_vehicle_true_.y;
-        p1_true.z = manual_vehicle_true_.z + 1.2;
-        p2_true.x = static_vehicle_.x;
-        p2_true.y = static_vehicle_.y;
-        p2_true.z = static_vehicle_.z + 1.2;
-        
-        line_marker_true.points.push_back(p1_true);
-        line_marker_true.points.push_back(p2_true);
-        line_marker_true.scale.x = 0.08;
-        line_marker_true.color.r = 0.0;
-        line_marker_true.color.g = 0.0;
-        line_marker_true.color.b = 1.0;
-        line_marker_true.color.a = 0.7;
-        line_marker_true.lifetime = ros::Duration(0.2);
-        marker_array.markers.push_back(line_marker_true);
-        
-        ttc_marker_pub_.publish(marker_array);
-        
-        // Text marker showing both TTCs
-        visualization_msgs::Marker text_marker;
-        text_marker.header.frame_id = "map";
-        text_marker.header.stamp = ros::Time::now();
-        text_marker.ns = "ttc_text";
-        text_marker.id = 2;
-        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
-        text_marker.action = visualization_msgs::Marker::ADD;
-        
-        text_marker.pose.position.x = (manual_vehicle_noisy_.x + static_vehicle_.x) / 2.0;
-        text_marker.pose.position.y = (manual_vehicle_noisy_.y + static_vehicle_.y) / 2.0;
-        text_marker.pose.position.z = std::max(manual_vehicle_noisy_.z, static_vehicle_.z) + 3.0;
-        
-        std::stringstream ss;
-        double distance_true = calculateClosestDistance(static_vehicle_, manual_vehicle_true_);
-        double distance_est = calculateClosestDistance(static_vehicle_, manual_vehicle_noisy_);
-        
-        if (ttc_true >= 0 && ttc_estimated >= 0) {
-            ss << "TTC (True): " << std::fixed << std::setprecision(2) << ttc_true << " s\n";
-            ss << "TTC (Est):  " << std::fixed << std::setprecision(2) << ttc_estimated << " s\n";
-            ss << "Error: " << std::fixed << std::setprecision(2) << std::abs(ttc_true - ttc_estimated) << " s\n";
-            ss << "Dist (True): " << std::fixed << std::setprecision(1) << distance_true << " m\n";
-            ss << "Dist (Est):  " << std::fixed << std::setprecision(1) << distance_est << " m";
-        } else {
-            ss << "TTC: N/A (Not Approaching)";
-        }
-        
-        text_marker.text = ss.str();
-        text_marker.scale.z = 0.8;
-        text_marker.color = line_marker.color;
-        text_marker.lifetime = ros::Duration(0.2);
-        
-        ttc_text_pub_.publish(text_marker);
-    }
-    
-    void timerCallback(const ros::TimerEvent&) {
-        double ttc_true = calculateTTC(manual_vehicle_true_);
-        double ttc_estimated = calculateTTC(manual_vehicle_noisy_);
-        
-        publishVisualization(ttc_true, ttc_estimated);
+        // Broadcast TF frames for vehicles
+        publishTF(current_time);
         
         // Console output
         if (ttc_true >= 0 || ttc_estimated >= 0) {
-            double distance_true = calculateClosestDistance(static_vehicle_, manual_vehicle_true_);
-            double distance_est = calculateClosestDistance(static_vehicle_, manual_vehicle_noisy_);
-            
-            double pos_error = calculateDistance2D(manual_vehicle_true_.x, manual_vehicle_true_.y,
-                                                   manual_vehicle_noisy_.x, manual_vehicle_noisy_.y);
-            
             if (ttc_true >= 0 && ttc_estimated >= 0) {
                 double ttc_error = std::abs(ttc_true - ttc_estimated);
-                ROS_INFO_THROTTLE(1.0, "TTC True: %.2f s | TTC Est: %.2f s | Error: %.2f s | Pos Error: %.2f m", 
-                                 ttc_true, ttc_estimated, ttc_error, pos_error);
+                
+                // Use ROS_WARN for COLLISION events
+                if (warning_level == "COLLISION") {
+                    ROS_WARN("COLLISION DETECTED! TTC True: %.2f s | TTC Est: %.2f s | Distance: %.2f m", 
+                             ttc_true, ttc_estimated, distance_estimated);
+                } else {
+                    ROS_INFO_THROTTLE(1.0, "TTC True: %.2f s | TTC Est: %.2f s | Error: %.2f s | Pos Error: %.2f m | Warning: %s", 
+                                     ttc_true, ttc_estimated, ttc_error, position_error, warning_level.c_str());
+                }
             } else {
                 ROS_INFO_THROTTLE(2.0, "TTC: N/A (Not Approaching)");
             }

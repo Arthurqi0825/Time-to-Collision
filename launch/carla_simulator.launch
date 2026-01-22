@@ -1,0 +1,45 @@
+<launch>
+    <!-- TTC System Parameters -->
+    
+    <!-- Noise parameters -->
+    <arg name="noise_std" default="0.5" />
+    <arg name="comm_delay" default="0.1" />
+    
+    <!-- TTC thresholds -->
+    <arg name="ttc_warning_threshold" default="5.0" />
+    <arg name="ttc_critical_threshold" default="1.6" />
+    
+    <!-- Update rate (Hz) -->
+    <arg name="update_rate" default="500.0" />
+    
+    <!-- TTC Calculator Node -->
+    <node pkg="ttc" type="ttc_calculator" name="ttc_calculator" output="screen">
+        <!-- Noise and delay parameters -->
+        <param name="noise_std" value="$(arg noise_std)" />
+        <param name="comm_delay" value="$(arg comm_delay)" />
+        
+        <!-- Threshold parameters -->
+        <param name="ttc_warning_threshold" value="$(arg ttc_warning_threshold)" />
+        <param name="ttc_critical_threshold" value="$(arg ttc_critical_threshold)" />
+        
+        <!-- Update rate -->
+        <param name="update_rate" value="$(arg update_rate)" />
+    </node>
+    
+    <!-- TTC Visualizer Node -->
+    <node pkg="ttc" type="ttc_visualizer" name="ttc_visualizer" output="screen">
+        <!-- Threshold parameters (for color coding) -->
+        <param name="ttc_warning_threshold" value="$(arg ttc_warning_threshold)" />
+        <param name="ttc_critical_threshold" value="$(arg ttc_critical_threshold)" />
+        
+        <!-- Update rate -->
+        <param name="update_rate" value="$(arg update_rate)" />
+    </node>
+    
+    <!-- CARLA Vehicle Simulation (Python script in separate gnome-terminal) -->
+    <node pkg="ttc" type="ttc.py" name="carla_vehicle_sim" 
+          launch-prefix="gnome-terminal -- bash -c" output="screen" />
+
+    <!-- RViz Visualization -->
+    <!-- <node pkg="rviz" type="rviz" name="rviz" args="-d $(find ttc)/rviz/ttc.rviz"/> -->
+</launch>

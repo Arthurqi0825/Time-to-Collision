@@ -22,7 +22,8 @@ Controls:
     A/D          : steer left/right
     Q            : toggle reverse
     Space        : hand-brake
-    P            : toggle autopilot
+    P            : toggle autopilot (manual vehicle)
+    O            : toggle autopilot (static vehicle)
     ESC          : quit
 """
 
@@ -37,7 +38,7 @@ from datetime import datetime
 
 try:
     import pygame
-    from pygame.locals import K_ESCAPE, K_SPACE, K_a, K_d, K_s, K_w, K_q, K_p
+    from pygame.locals import K_ESCAPE, K_SPACE, K_a, K_d, K_s, K_w, K_q, K_p, K_o
     from pygame.locals import KMOD_CTRL
 except ImportError:
     raise RuntimeError('cannot import pygame, make sure pygame package is installed')
@@ -50,7 +51,7 @@ except ImportError:
 try:
     import rospy
     from geometry_msgs.msg import PoseStamped, TwistStamped, Point, Vector3
-    from std_msgs.msg import Header, ColorRGBA
+    from std_msgs.msg import Header, ColorRGBA, Float64, String
     from visualization_msgs.msg import Marker
     ROS_AVAILABLE = True
 except ImportError:
@@ -62,6 +63,13 @@ except ImportError:
 # ==============================================================================
 # -- ROS Publisher -------------------------------------------------------------
 # ==============================================================================
+sedan_ids = [
+    'vehicle.tesla.model3',
+    'vehicle.audi.a2',
+    'vehicle.toyota.prius',
+    'vehicle.seat.leon'
+]
+
 
 class ROSPositionPublisher:
     """Publishes vehicle position and velocity data to ROS topics"""
@@ -266,6 +274,14 @@ class KeyboardControl(object):
             self._world.player.set_autopilot(self._autopilot_enabled)
             time.sleep(0.2)
         
+        # Toggle static vehicle autopilot with 'O' key
+        if keys[K_o]:
+            self._world.static_autopilot_enabled = not self._world.static_autopilot_enabled
+            self._world.static_vehicle.set_autopilot(self._world.static_autopilot_enabled)
+            status = "ENABLED" if self._world.static_autopilot_enabled else "DISABLED"
+            print(f"\n>>> Static vehicle autopilot: {status}")
+            time.sleep(0.2)
+        
         if not self._autopilot_enabled:
             self._parse_vehicle_keys(keys, milliseconds)
             self._world.player.apply_control(self._control)
@@ -327,6 +343,45 @@ class HUD(object):
         self.server_fps = 0
         self.frame = 0
         self.simulation_time = 0
+        
+        # TTC data
+        self.ttc_estimated = None
+        self.ttc_warning_level = None
+        self.ttc_last_update = None
+        self.ttc_timeout = 2.0  # seconds before considering topic dead
+        
+        # Collision warning persistence
+        self.collision_detected = False
+        self.collision_detection_time = None
+        self.collision_display_duration = 2  # Show COLLISION warning for 5 seconds
+        
+        # Subscribe to TTC topics if ROS is available
+        if ROS_AVAILABLE:
+            self.ttc_sub = rospy.Subscriber('/ttc/estimated', Float64, self.ttc_callback, queue_size=10)
+            self.warning_sub = rospy.Subscriber('/ttc/warning_level', String, self.warning_callback, queue_size=10)
+            print("HUD: Subscribed to TTC topics")
+        else:
+            self.ttc_sub = None
+            self.warning_sub = None
+    
+    def ttc_callback(self, msg):
+        """Callback for TTC estimated topic"""
+        self.ttc_estimated = msg.data
+        self.ttc_last_update = time.time()
+    
+    def warning_callback(self, msg):
+        """Callback for warning level topic"""
+        self.ttc_warning_level = msg.data
+        
+        # Track collision events for persistent display
+        if msg.data == "COLLISION":
+            if not self.collision_detected:
+                # New collision detected
+                self.collision_detected = True
+                self.collision_detection_time = time.time()
+                print("\n" + "="*50)
+                print("🚨 COLLISION DETECTED - HUD ALERT ACTIVE 🚨")
+                print("="*50 + "\n")
     
     def tick(self, world, clock):
         """Update HUD information"""
@@ -370,6 +425,55 @@ class HUD(object):
                 manual_loc = world.player.get_location()
                 distance = static_loc.distance(manual_loc)
                 self._info_text.append(f'  Distance: {distance:.1f} m')
+        
+        # Add TTC information
+        self._info_text.append('')
+        self._info_text.append('TTC Information:')
+        
+        # Check if we should still display collision warning
+        display_collision_warning = False
+        if self.collision_detected and self.collision_detection_time is not None:
+            time_since_collision = time.time() - self.collision_detection_time
+            if time_since_collision < self.collision_display_duration:
+                display_collision_warning = True
+            else:
+                # Reset collision flag after display duration
+                self.collision_detected = False
+                self.collision_detection_time = None
+        
+        if ROS_AVAILABLE:
+            # Check if TTC topic is active (received data recently)
+            if self.ttc_last_update is not None:
+                time_since_update = time.time() - self.ttc_last_update
+                
+                if time_since_update < self.ttc_timeout:
+                    # Topic is active
+                    
+                    # Show persistent collision warning if active
+                    if display_collision_warning:
+                        time_remaining = self.collision_display_duration - (time.time() - self.collision_detection_time)
+                        ttc_str = f"  🚨 COLLISION DETECTED! 🚨 ({time_remaining:.1f}s)"
+                        self._info_text.append(ttc_str)
+                        self._info_text.append(f"  Warning: COLLISION")
+                    elif self.ttc_estimated is not None:
+                        if self.ttc_estimated < 0:
+                            ttc_str = "  TTC: N/A (Not Approaching)"
+                        elif self.ttc_estimated < 0.01:
+                            ttc_str = "  TTC: COLLISION!"
+                        else:
+                            ttc_str = f"  TTC: {self.ttc_estimated:.2f} s"
+                        self._info_text.append(ttc_str)
+                    
+                        if self.ttc_warning_level is not None:
+                            self._info_text.append(f"  Warning: {self.ttc_warning_level}")
+                else:
+                    # Topic timed out
+                    self._info_text.append("  TTC: No topic received")
+            else:
+                # Never received data
+                self._info_text.append("  TTC: No topic received")
+        else:
+            self._info_text.append("  TTC: ROS not available")
     
     def render(self, display):
         """Render HUD on display"""
@@ -380,7 +484,37 @@ class HUD(object):
         
         v_offset = 10
         for item in self._info_text:
-            surface = font.render(item, True, (255, 255, 255))
+            # Color-code TTC warnings
+            color = (255, 255, 255)  # Default white
+            
+            # Check for persistent collision warning (with emoji)
+            if '🚨' in item or 'COLLISION DETECTED' in item:
+                color = (255, 0, 255)  # Bright magenta for collision alert
+            elif 'TTC:' in item:
+                if 'COLLISION' in item:
+                    color = (255, 0, 255)  # Magenta for collision
+                elif 'No topic received' in item:
+                    color = (128, 128, 128)  # Gray for no data
+                elif self.collision_detected or self.ttc_warning_level == 'COLLISION':
+                    color = (255, 0, 255)  # Magenta
+                elif self.ttc_warning_level == 'CRITICAL':
+                    color = (255, 0, 0)  # Red
+                elif self.ttc_warning_level == 'WARNING':
+                    color = (255, 255, 0)  # Yellow
+                elif self.ttc_warning_level == 'SAFE':
+                    color = (0, 255, 0)  # Green
+            
+            if 'Warning:' in item:
+                if 'COLLISION' in item:
+                    color = (255, 0, 255)  # Magenta
+                elif 'CRITICAL' in item:
+                    color = (255, 0, 0)  # Red
+                elif 'WARNING' in item:
+                    color = (255, 255, 0)  # Yellow
+                elif 'SAFE' in item:
+                    color = (0, 255, 0)  # Green
+            
+            surface = font.render(item, True, color)
             display.blit(surface, (10, v_offset))
             v_offset += 25
     
@@ -412,9 +546,11 @@ class World(object):
         self.spawn_static_vehicle()
         self.spawn_manual_vehicle(args.spawn_radius)
         time.sleep(1.0)  # Allow some time for the static vehicle to settle
-        # self.static_vehicle.set_simulate_physics(False)
-
-        self.static_vehicle.set_autopilot(True)
+        # Static vehicle autopilot starts as False
+        # Press 'O' to enable autopilot for static vehicle
+        self.static_vehicle.set_autopilot(False)
+        self.static_autopilot_enabled = False
+        
         if self.player is not None:
             self.setup_camera()
         
@@ -423,8 +559,8 @@ class World(object):
     def spawn_static_vehicle(self):
         """Spawn a static vehicle at a random spawn point"""
         blueprint_library = self.world.get_blueprint_library()
-        vehicle_bp = random.choice(blueprint_library.filter('vehicle.*'))
-        
+        # vehicle_bp = random.choice(blueprint_library.filter('vehicle.*'))
+        vehicle_bp = random.choice([blueprint_library.find(x) for x in sedan_ids])
         spawn_points = self.world.get_map().get_spawn_points()
         
         if not spawn_points:
@@ -440,12 +576,13 @@ class World(object):
         print(f"\nStatic vehicle spawned:")
         print(f"  Type: {vehicle_bp.id}")
         print(f"  Position: ({location.x:.2f}, {location.y:.2f}, {location.z:.2f})")
-        print(f"  Physics: Disabled (static)")
+        print(f"  Physics: Enabled")
+        print(f"  Autopilot: Disabled (press 'O' to enable)")
     
     def spawn_manual_vehicle(self, radius):
         """Spawn a vehicle for manual control near the static vehicle"""
         blueprint_library = self.world.get_blueprint_library()
-        vehicle_bp = random.choice(blueprint_library.filter(self._actor_filter))
+        vehicle_bp = random.choice([blueprint_library.find(x) for x in sedan_ids])
         vehicle_bp.set_attribute('role_name', 'hero')
         
         if self.static_vehicle is None:
@@ -580,8 +717,13 @@ def game_loop(args):
             print(f"  - {world.manual_publisher.bbox_topic}")
         else:
             print("\nROS NOT AVAILABLE - Running in console-only mode")
-        print("\nControls: W/A/S/D for movement, Space for brake, P for autopilot")
-        print("Press ESC to quit\n")
+        print("\nControls:")
+        print("  W/A/S/D - Control manual vehicle movement")
+        print("  Space   - Brake")
+        print("  P       - Toggle autopilot (manual vehicle)")
+        print("  O       - Toggle autopilot (static vehicle)")
+        print("  ESC     - Quit")
+        print("="*70 + "\n")
         
         while True:
             if args.sync:
